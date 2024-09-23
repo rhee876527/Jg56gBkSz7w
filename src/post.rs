@@ -1,179 +1,251 @@
 // CRATES
-extern crate comrak;
-use actix_web::{get, web, HttpResponse, Result};
+use crate::client::json;
+use crate::config::get_setting;
+use crate::server::RequestExt;
+use crate::subreddit::{can_access_quarantine, quarantine};
+use crate::utils::{
+	error, format_num, get_filters, nsfw_landing, param, parse_post, rewrite_urls, setting, template, time, val, Author, Awards, Comment, Flair, FlairPart, Post, Preferences,
+};
+use hyper::{Body, Request, Response};
+
 use askama::Template;
-use comrak::{markdown_to_html, ComrakOptions};
-use chrono::{TimeZone, Utc};
+use once_cell::sync::Lazy;
+use regex::Regex;
+use std::collections::HashSet;
 
 // STRUCTS
 #[derive(Template)]
-#[template(path = "post.html", escape = "none")]
+#[template(path = "post.html")]
 struct PostTemplate {
 	comments: Vec<Comment>,
 	post: Post,
-	sort: String
+	sort: String,
+	prefs: Preferences,
+	single_thread: bool,
+	url: String,
+	url_without_query: String,
+	comment_query: String,
 }
 
-pub struct Post {
-	pub title: String,
-	pub community: String,
-	pub body: String,
-	pub author: String,
-	pub url: String,
-	pub score: String,
-	pub media: String,
-	pub time: String
-}
+static COMMENT_SEARCH_CAPTURE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\?q=(.*)&type=comment").unwrap());
 
-pub struct Comment {
-	pub body: String,
-	pub author: String,
-	pub score: i64,
-	pub time: String
-}
+pub async fn item(req: Request<Body>) -> Result<Response<Body>, String> {
+	// Build Reddit API path
+	let mut path: String = format!("{}.json?{}&raw_json=1", req.uri().path(), req.uri().query().unwrap_or_default());
+	let sub = req.param("sub").unwrap_or_default();
+	let quarantined = can_access_quarantine(&req, &sub);
+	let url = req.uri().to_string();
 
-async fn render(id: String, sort: String) -> Result<HttpResponse> {
-	println!("id: {}", id);
-	let post: Post = fetch_post(&id).await;
-	let comments: Vec<Comment> = fetch_comments(id, &sort).await.unwrap();
-	
-	let s = PostTemplate {
-		comments: comments,
-		post: post,
-		sort: sort
-	}
-	.render()
-	.unwrap();
-	Ok(HttpResponse::Ok().content_type("text/html").body(s))
-}
+	// Set sort to sort query parameter
+	let sort = param(&path, "sort").unwrap_or_else(|| {
+		// Grab default comment sort method from Cookies
+		let default_sort = setting(&req, "comment_sort");
 
-// SERVICES
-#[get("/{id}")]
-async fn short(web::Path(id): web::Path<String>) -> Result<HttpResponse> {
-	render(id.to_string(), "confidence".to_string()).await
-}
+		// If there's no sort query but there's a default sort, set sort to default_sort
+		if default_sort.is_empty() {
+			String::new()
+		} else {
+			path = format!("{}.json?{}&sort={}&raw_json=1", req.uri().path(), req.uri().query().unwrap_or_default(), default_sort);
+			default_sort
+		}
+	});
 
-#[get("/r/{sub}/comments/{id}/{title}")]
-async fn page(web::Path((_sub, id)): web::Path<(String, String)>) -> Result<HttpResponse> {
-	render(id.to_string(), "confidence".to_string()).await
-}
+	// Log the post ID being fetched in debug mode
+	#[cfg(debug_assertions)]
+	req.param("id").unwrap_or_default();
 
-#[get("/r/{sub}/comments/{id}/{title}/{sort}")]
-async fn sorted(web::Path((_sub, id, _title, sort)): web::Path<(String, String, String, String)>) -> Result<HttpResponse> {
-	render(id.to_string(), sort).await
-}
+	let single_thread = req.param("comment_id").is_some();
+	let highlighted_comment = &req.param("comment_id").unwrap_or_default();
 
-// UTILITIES
-async fn val (j: &serde_json::Value, k: &str) -> String { String::from(j["data"][k].as_str().unwrap_or("")) }
+	// Send a request to the url, receive JSON in response
+	match json(path, quarantined).await {
+		// Otherwise, grab the JSON output from the request
+		Ok(response) => {
+			// Parse the JSON into Post and Comment structs
+			let post = parse_post(&response[0]["data"]["children"][0]).await;
 
-async fn media(data: &serde_json::Value) -> String {
-	let post_hint: &str = data["data"]["post_hint"].as_str().unwrap_or("");
-	let has_media: bool = data["data"]["media"].is_object();
+			let req_url = req.uri().to_string();
+			// Return landing page if this post if this Reddit deems this post
+			// NSFW, but we have also disabled the display of NSFW content
+			// or if the instance is SFW-only.
+			if post.nsfw && crate::utils::should_be_nsfw_gated(&req, &req_url) {
+				return Ok(nsfw_landing(req, req_url).await.unwrap_or_default());
+			}
 
-	let media: String = if !has_media { format!(r#"<h4 class="post_body"><a href="{u}">{u}</a></h4>"#, u=data["data"]["url"].as_str().unwrap()) }
-											else { format!(r#"<img class="post_image" src="{}.png"/>"#, data["data"]["url"].as_str().unwrap()) };
+			let query = match COMMENT_SEARCH_CAPTURE.captures(&url) {
+				Some(captures) => captures.get(1).unwrap().as_str().replace("%20", " ").replace('+', " "),
+				None => String::new(),
+			};
 
-	match post_hint {
-		"hosted:video" => format!(r#"<video class="post_image" src="{}" controls/>"#, data["data"]["media"]["reddit_video"]["fallback_url"].as_str().unwrap()),
-		"image" => format!(r#"<img class="post_image" src="{}"/>"#, data["data"]["url"].as_str().unwrap()),
-		"self" => String::from(""),
-		_ => media
-	}
-}
+			let comments = match query.as_str() {
+				"" => parse_comments(&response[1], &post.permalink, &post.author.name, highlighted_comment, &get_filters(&req), &req),
+				_ => query_comments(&response[1], &post.permalink, &post.author.name, highlighted_comment, &get_filters(&req), &query, &req),
+			};
 
-// POSTS
-// async fn post_html (post: Post) -> String {
-// 	format!(r#"
-// 		<div class="post" style="border: 2px solid #555;background: #222;">
-// 			<div class="post_left" style="background: #333;">
-// 				<button class="post_upvote">↑</button>
-// 				<h3 class="post_score">{}</h3>
-// 				<button class="post_upvote">↓</button>
-// 			</div>
-// 			<div class="post_right">
-// 				<p>
-// 					<b><a class="post_subreddit" href="/r/{sub}">r/{sub}</a></b>
-// 					•
-// 					Posted by 
-// 					<a class="post_author" href="/u/{author}">u/{author}</a>
-// 					<span style="float: right;">{time}</span>
-// 				</p>
-// 				<h3 class="post_title">{t}</h3>
-// 				{media}
-// 				<h4 class="post_body">{b}</h4>
-// 			</div>
-// 		</div><br>
-// 	"#, if post.score>1000{format!("{}k", post.score/1000)} else {post.score.to_string()}, sub = post.community,
-// 			author = post.author, t = post.title, media = post.media, b = post.body, time = post.time)
-// }
-
-async fn fetch_post (id: &String) -> Post {
-	let url: String = format!("https://reddit.com/{}.json", id);
-	let resp: String = reqwest::get(&url).await.unwrap().text().await.unwrap();
-	
-	let data: serde_json::Value = serde_json::from_str(resp.as_str()).expect("Failed to parse JSON");
-	
-	let post_data: &serde_json::Value = &data[0]["data"]["children"][0];
-
-	let unix_time: i64 = post_data["data"]["created_utc"].as_f64().unwrap().round() as i64;
-	let score = post_data["data"]["score"].as_i64().unwrap();
-
-	Post {
-		title: val(post_data, "title").await,
-		community: val(post_data, "subreddit").await,
-		body: markdown_to_html(post_data["data"]["selftext"].as_str().unwrap(), &ComrakOptions::default()),
-		author: val(post_data, "author").await,
-		url: val(post_data, "permalink").await,
-		score: if score>1000 {format!("{}k",score/1000)} else {score.to_string()},
-		media: media(post_data).await,
-		time: Utc.timestamp(unix_time, 0).format("%b %e %Y %H:%M UTC").to_string()
+			// Use the Post and Comment structs to generate a website to show users
+			Ok(template(&PostTemplate {
+				comments,
+				post,
+				url_without_query: url.clone().trim_end_matches(&format!("?q={query}&type=comment")).to_string(),
+				sort,
+				prefs: Preferences::new(&req),
+				single_thread,
+				url: req_url,
+				comment_query: query,
+			}))
+		}
+		// If the Reddit API returns an error, exit and send error page to user
+		Err(msg) => {
+			if msg == "quarantined" || msg == "gated" {
+				let sub = req.param("sub").unwrap_or_default();
+				Ok(quarantine(&req, sub, &msg))
+			} else {
+				error(req, &msg).await
+			}
+		}
 	}
 }
 
 // COMMENTS
-async fn fetch_comments (id: String, sort: &String) -> Result<Vec<Comment>, Box<dyn std::error::Error>> {
-	let url: String = format!("https://reddit.com/{}.json?sort={}", id, sort);
-	let resp: String = reqwest::get(&url).await?.text().await?;
-	
-	let data: serde_json::Value = serde_json::from_str(resp.as_str())?;
-	
-	let comment_data = data[1]["data"]["children"].as_array().unwrap();
 
-	let mut comments: Vec<Comment> = Vec::new();
-	
-	for comment in comment_data.iter() {
-		let unix_time: i64 = comment["data"]["created_utc"].as_f64().unwrap_or(0.0).round() as i64;
-		comments.push(Comment {
-			body: markdown_to_html(comment["data"]["body"].as_str().unwrap_or(""), &ComrakOptions::default()),
-			author: val(comment, "author").await,
-			score: comment["data"]["score"].as_i64().unwrap_or(0),
-			time: Utc.timestamp(unix_time, 0).format("%b %e %Y %H:%M UTC").to_string()
-		});
-	}
+fn parse_comments(json: &serde_json::Value, post_link: &str, post_author: &str, highlighted_comment: &str, filters: &HashSet<String>, req: &Request<Body>) -> Vec<Comment> {
+	// Parse the comment JSON into a Vector of Comments
+	let comments = json["data"]["children"].as_array().map_or(Vec::new(), std::borrow::ToOwned::to_owned);
 
-	Ok(comments)
+	// For each comment, retrieve the values to build a Comment object
+	comments
+		.into_iter()
+		.map(|comment| {
+			let data = &comment["data"];
+			let replies: Vec<Comment> = if data["replies"].is_object() {
+				parse_comments(&data["replies"], post_link, post_author, highlighted_comment, filters, req)
+			} else {
+				Vec::new()
+			};
+			build_comment(&comment, data, replies, post_link, post_author, highlighted_comment, filters, req)
+		})
+		.collect()
 }
 
-// async fn comments_html (comments: Vec<Comment>) -> String {
-// 	let mut html: Vec<String> = Vec::new();
-// 	for comment in comments.iter() {
-// 		let hc: String = format!(r#"
-// 			<div class="post">
-// 				<div class="post_left">
-// 					<button class="post_upvote">↑</button>
-// 					<h3 class="post_score">{}</h3>
-// 					<button class="post_upvote">↓</button>
-// 				</div>
-// 				<div class="post_right">
-// 					<p>
-// 						Posted by <a class="post_author" href="/u/{author}">u/{author}</a>
-// 						<span style="float: right;">{time}</span>
-// 					</p>
-// 					<h4 class="post_body">{t}</h4>		
-// 				</div>
-// 			</div><br>
-// 		"#, if comment.score>1000{format!("{}k", comment.score/1000)} else {comment.score.to_string()},
-// 				author = comment.author, t = comment.body, time = comment.time);
-// 		html.push(hc)
-// 	}; html.join("\n")
-// }
+fn query_comments(
+	json: &serde_json::Value,
+	post_link: &str,
+	post_author: &str,
+	highlighted_comment: &str,
+	filters: &HashSet<String>,
+	query: &str,
+	req: &Request<Body>,
+) -> Vec<Comment> {
+	let comments = json["data"]["children"].as_array().map_or(Vec::new(), std::borrow::ToOwned::to_owned);
+	let mut results = Vec::new();
+
+	for comment in comments {
+		let data = &comment["data"];
+
+		// If this comment contains replies, handle those too
+		if data["replies"].is_object() {
+			results.append(&mut query_comments(&data["replies"], post_link, post_author, highlighted_comment, filters, query, req));
+		}
+
+		let c = build_comment(&comment, data, Vec::new(), post_link, post_author, highlighted_comment, filters, req);
+		if c.body.to_lowercase().contains(&query.to_lowercase()) {
+			results.push(c);
+		}
+	}
+
+	results
+}
+#[allow(clippy::too_many_arguments)]
+fn build_comment(
+	comment: &serde_json::Value,
+	data: &serde_json::Value,
+	replies: Vec<Comment>,
+	post_link: &str,
+	post_author: &str,
+	highlighted_comment: &str,
+	filters: &HashSet<String>,
+	req: &Request<Body>,
+) -> Comment {
+	let id = val(comment, "id");
+
+	let body = if (val(comment, "author") == "[deleted]" && val(comment, "body") == "[removed]") || val(comment, "body") == "[ Removed by Reddit ]" {
+		format!(
+			"<div class=\"md\"><p>[removed] — <a href=\"https://{}{post_link}{id}\">view removed comment</a></p></div>",
+			get_setting("REDLIB_PUSHSHIFT_FRONTEND").unwrap_or_else(|| String::from(crate::config::DEFAULT_PUSHSHIFT_FRONTEND)),
+		)
+	} else {
+		rewrite_urls(&val(comment, "body_html"))
+	};
+	let kind = comment["kind"].as_str().unwrap_or_default().to_string();
+
+	let unix_time = data["created_utc"].as_f64().unwrap_or_default();
+	let (rel_time, created) = time(unix_time);
+
+	let edited = data["edited"].as_f64().map_or((String::new(), String::new()), time);
+
+	let score = data["score"].as_i64().unwrap_or(0);
+
+	// The JSON API only provides comments up to some threshold.
+	// Further comments have to be loaded by subsequent requests.
+	// The "kind" value will be "more" and the "count"
+	// shows how many more (sub-)comments exist in the respective nesting level.
+	// Note that in certain (seemingly random) cases, the count is simply wrong.
+	let more_count = data["count"].as_i64().unwrap_or_default();
+
+	let awards: Awards = Awards::parse(&data["all_awardings"]);
+
+	let parent_kind_and_id = val(comment, "parent_id");
+	let parent_info = parent_kind_and_id.split('_').collect::<Vec<&str>>();
+
+	let highlighted = id == highlighted_comment;
+
+	let author = Author {
+		name: val(comment, "author"),
+		flair: Flair {
+			flair_parts: FlairPart::parse(
+				data["author_flair_type"].as_str().unwrap_or_default(),
+				data["author_flair_richtext"].as_array(),
+				data["author_flair_text"].as_str(),
+			),
+			text: val(comment, "link_flair_text"),
+			background_color: val(comment, "author_flair_background_color"),
+			foreground_color: val(comment, "author_flair_text_color"),
+		},
+		distinguished: val(comment, "distinguished"),
+	};
+	let is_filtered = filters.contains(&["u_", author.name.as_str()].concat());
+
+	// Many subreddits have a default comment posted about the sub's rules etc.
+	// Many Redlib users do not wish to see this kind of comment by default.
+	// Reddit does not tell us which users are "bots", so a good heuristic is to
+	// collapse stickied moderator comments.
+	let is_moderator_comment = data["distinguished"].as_str().unwrap_or_default() == "moderator";
+	let is_stickied = data["stickied"].as_bool().unwrap_or_default();
+	let collapsed = (is_moderator_comment && is_stickied) || is_filtered;
+
+	Comment {
+		id,
+		kind,
+		parent_id: parent_info[1].to_string(),
+		parent_kind: parent_info[0].to_string(),
+		post_link: post_link.to_string(),
+		post_author: post_author.to_string(),
+		body,
+		author,
+		score: if data["score_hidden"].as_bool().unwrap_or_default() {
+			("\u{2022}".to_string(), "Hidden".to_string())
+		} else {
+			format_num(score)
+		},
+		rel_time,
+		created,
+		edited,
+		replies,
+		highlighted,
+		awards,
+		collapsed,
+		is_filtered,
+		more_count,
+		prefs: Preferences::new(req),
+	}
+}

@@ -1,64 +1,91 @@
-<html>
-	<head>
-		<title>{{ post.title }} - r/{{ post.community }}</title>
-		<meta name="author" content="u/{{ post.author }}">
-		<meta name="description" content="View on Libreddit, an alternative private front-end to Reddit.">
-		<link rel="stylesheet" href="/style.css">
-		<style>
-			/* #sort > #sort_{{ sort }} {
-				background: aqua;
-				color: black;
-			} */
-		</style>
-	</head>
-	<body>
-		<header>
-			<a href="/"><span style="color:white">lib</span>reddit.</a>
-			<a style="color:white" href="https://github.com/spikecodes/libreddit">GITHUB</a>
-		</header>
-		<main>
-			<div class="post" style="border: 2px solid #555;background: #222;">
-				<div class="post_left" style="background: #333;">
-					<button class="post_upvote">↑</button>
-					<h3 class="post_score">{{ post.score }}</h3>
-					<button class="post_upvote">↓</button>
-				</div>
-				<div class="post_right">
-					<p>
-						<b><a class="post_subreddit" href="/r/{{ post.community }}">r/{{ post.community }}</a></b>
-						&bull;
-						Posted by 
-						<a class="post_author" href="/u/{{ post.author }}">u/{{ post.author }}</a>
-						<span style="float: right;">{{ post.time }}</span>
-					</p>
-					<h3 class="post_title">{{ post.title }}</h3>
-					{{ post.media }}
-					<h4 class="post_body">{{ post.body }}</h4>
-				</div>
-			</div>
-			<div id="sort">
-				<div id="sort_confidence"><a href="{{ post.url }}confidence">Best</a></div>
-				<div id="sort_top"><a href="{{ post.url }}top">Top</a></div>
-				<div id="sort_new"><a href="{{ post.url }}new">New</a></div>
-				<div id="sort_controversial"><a href="{{ post.url }}controversial">Controversial</a></div>
-				<div id="sort_old"><a href="{{ post.url }}old">Old</a></div>
-			</div>
-			{% for comment in comments %}
-			<div class="comment">
-				<div class="comment_left">
-					<button class="comment_upvote">↑</button>
-					<h3 class="comment_score">{{ comment.score }}</h3>
-					<button class="comment_upvote">↓</button>
-				</div>
-				<div class="comment_right">
-					<p>
-						Posted by <a class="comment_author" href="/u/{{ comment.author }}">u/{{ comment.author }}</a>
-						<span style="float: right;">{{ comment.time }}</span>
-					</p>
-					<h4 class="comment_body">{{ comment.body }}</h4>
-				</div>
-			</div><br>
-			{% endfor %}
-		</main>
-	</body>
-</html>
+{% extends "base.html" %}
+{% import "utils.html" as utils %}
+
+{% block title %}{{ post.title }} - r/{{ post.community }}{% endblock %}
+
+{% block search %}
+	{% call utils::search(["/r/", post.community.as_str()].concat(), "") %}
+{% endblock %}
+
+{% block root %}/r/{{ post.community }}{% endblock %}{% block location %}r/{{ post.community }}{% endblock %}
+{% block head %}
+	{% call super() %}
+	<!-- Meta Tags -->
+	<meta name="author" content="u/{{ post.author.name }}">
+	<meta name="title" content="{{ post.title }} - r/{{ post.community }}">
+	<meta property="og:title" content="{{ post.title }} - r/{{ post.community }}">
+	<meta property="og:description" content="View on Redlib, an alternative private front-end to Reddit.">
+	<meta property="og:url" content="{{ post.permalink }}">
+	<meta property="twitter:url" content="{{ post.permalink }}">
+	<meta property="twitter:title" content="{{ post.title }} - r/{{ post.community }}">
+	<meta property="twitter:description" content="View on Redlib, an alternative private front-end to Reddit.">
+	{% if post.post_type == "image" %}
+	<meta property="og:type" content="image">
+	<meta property="og:image" content="{{ post.thumbnail.url }}">
+	<meta property="twitter:card" content="summary_large_image">
+	<meta property="twitter:image" content="{{ post.thumbnail.url }}">
+	{% else if post.post_type == "video" || post.post_type == "gif" %}
+	<meta property="twitter:card" content="video">
+	<meta property="og:type" content="video">
+	<meta property="og:video" content="{{ post.media.url }}">
+	<meta property="og:video:type" content="video/mp4">
+	{% else %}
+	<meta property="og:type" content="website">
+	{% if single_thread %}
+	<script src="/highlighted.js" defer></script>
+	{% endif %}
+	{% endif %}
+{% endblock %}
+
+{% block subscriptions %}
+	{% call utils::sub_list(post.community.as_str()) %}
+{% endblock %}
+
+{% block content %}
+	<div id="column_one">
+		{% call utils::post(post) %}
+
+		<!-- SORT FORM -->
+       <div id="commentQueryForms">
+		<form id="sort">
+			<p id="comment_count">{{post.comments.0}} {% if post.comments.0 == "1" %}comment{% else %}comments{% endif %} <span id="sorted_by">sorted by </span></p>
+			<select name="sort" title="Sort comments by" id="commentSortSelect"> 
+				{% call utils::options(sort, ["confidence", "top", "new", "controversial", "old"], "confidence") %}
+      </select>
+        <button id="sort_submit" class="submit">
+          <svg width="15" viewBox="0 0 110 100" fill="none" stroke-width="10" stroke-linecap="round">
+              <path d="M20 50 H100" />
+              <path d="M75 15 L100 50 L75 85" />
+              &rarr;
+          </svg>
+      </button>
+      </form>
+      <!-- SEARCH FORM -->
+      <form id="sort">
+        <input id="search" class="commentQuery" type="search" name="q" value="{{ comment_query }}" placeholder="Search comments">
+        <input type="hidden" name="type" value="comment">
+      </form>
+      </div>
+  
+      <div>
+      {% if comment_query != "" %}
+      Comments containing "{{ comment_query }}"&nbsp;|&nbsp;<a id="allCommentsLink" href="{{ url_without_query }}">All comments</a>
+      {% endif %}
+      </div>
+
+		<!-- COMMENTS -->
+		{% for c in comments -%}
+		<div class="thread">
+			{% if single_thread %}
+			<p class="thread_nav"><a href="{{ post.permalink }}">View all comments</a></p>
+			{% if c.parent_kind == "t1" %}
+			<p class="thread_nav"><a href="?context=9999">Show parent comments</a></p>
+			{% endif %}
+			{% endif %}
+			
+			{{ c.render().unwrap()|safe }}
+		</div>
+		{%- endfor %}
+
+	</div>
+{% endblock %}

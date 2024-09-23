@@ -1,17 +1,57 @@
 [package]
-name = "libreddit-actix"
-version = "0.1.0"
-authors = ["spikecodes <19519553+spikecodes@users.noreply.github.com>"]
-edition = "2018"
+name = "redlib"
+description = " Alternative private front-end to Reddit"
+license = "AGPL-3.0-only"
+repository = "https://github.com/redlib-org/redlib"
+version = "0.35.1"
+authors = [
+    "Matthew Esposito <matt+cargo@matthew.science>",
+    "spikecodes <19519553+spikecodes@users.noreply.github.com>",
+]
+edition = "2021"
 
 [dependencies]
-actix-web = "3"
-actix-files = "0.4.0"
-askama = "0.9"
-serde_json = "1.0"
-reqwest = { version = "0.10", features = ["blocking"] }
-comrak = "0.8"
-chrono = "0.4"
+askama = { version = "0.12.1", default-features = false }
+cached = { version = "0.51.3", features = ["async"] }
+clap = { version = "4.4.11", default-features = false, features = [
+    "std",
+    "env",
+] }
+regex = "1.10.2"
+serde = { version = "1.0.193", features = ["derive"] }
+cookie = "0.18.0"
+futures-lite = "2.2.0"
+hyper = { version = "0.14.28", features = ["full"] }
+hyper-rustls = "0.24.2"
+percent-encoding = "2.3.1"
+route-recognizer = "0.3.1"
+serde_json = "1.0.108"
+tokio = { version = "1.35.1", features = ["full"] }
+time = { version = "0.3.31", features = ["local-offset"] }
+url = "2.5.0"
+rust-embed = { version = "8.1.0", features = ["include-exclude"] }
+libflate = "2.0.0"
+brotli = { version = "6.0.0", features = ["std"] }
+toml = "0.8.8"
+once_cell = "1.19.0"
+serde_yaml = "0.9.29"
+build_html = "2.4.0"
+uuid = { version = "1.6.1", features = ["v4"] }
+base64 = "0.22.1"
+fastrand = "2.0.1"
+log = "0.4.20"
+pretty_env_logger = "0.5.0"
+dotenvy = "0.15.7"
+rss = "2.0.7"
+arc-swap = "1.7.1"
+async-recursion = "1.1.1"
 
-[build-dependencies]
-askama = "0.9"
+
+[dev-dependencies]
+lipsum = "0.9.0"
+sealed_test = "1.0.0"
+
+[profile.release]
+codegen-units = 1
+lto = true
+strip = "symbols"

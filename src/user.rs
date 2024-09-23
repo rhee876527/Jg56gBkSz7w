@@ -1,106 +1,188 @@
 // CRATES
-extern crate comrak;
-use actix_web::{get, web, HttpResponse, Result};
+use crate::client::json;
+use crate::server::RequestExt;
+use crate::utils::{error, filter_posts, format_url, get_filters, nsfw_landing, param, setting, template, Post, Preferences, User};
+use crate::{config, utils};
 use askama::Template;
-use chrono::{TimeZone, Utc};
+use hyper::{Body, Request, Response};
+use time::{macros::format_description, OffsetDateTime};
 
 // STRUCTS
 #[derive(Template)]
-#[template(path = "user.html", escape = "none")]
+#[template(path = "user.html")]
 struct UserTemplate {
 	user: User,
 	posts: Vec<Post>,
-	sort: String
+	sort: (String, String),
+	ends: (String, String),
+	/// "overview", "comments", or "submitted"
+	listing: String,
+	prefs: Preferences,
+	url: String,
+	redirect_url: String,
+	/// Whether the user themself is filtered.
+	is_filtered: bool,
+	/// Whether all fetched posts are filtered (to differentiate between no posts fetched in the first place,
+	/// and all fetched posts being filtered).
+	all_posts_filtered: bool,
+	/// Whether all posts were hidden because they are NSFW (and user has disabled show NSFW)
+	all_posts_hidden_nsfw: bool,
+	no_posts: bool,
 }
 
-pub struct Post {
-	pub title: String,
-	pub community: String,
-	pub author: String,
-	pub score: String,
-	pub image: String,
-	pub url: String,
-	pub time: String
-}
+// FUNCTIONS
+pub async fn profile(req: Request<Body>) -> Result<Response<Body>, String> {
+	let listing = req.param("listing").unwrap_or_else(|| "overview".to_string());
 
-pub struct User {
-	pub name: String,
-	pub icon: String,
-	pub karma: i64,
-	pub banner: String,
-	pub description: String
-}
+	// Build the Reddit JSON API path
+	let path = format!(
+		"/user/{}/{listing}.json?{}&raw_json=1",
+		req.param("name").unwrap_or_else(|| "reddit".to_string()),
+		req.uri().query().unwrap_or_default(),
+	);
+	let url = String::from(req.uri().path_and_query().map_or("", |val| val.as_str()));
+	let redirect_url = url[1..].replace('?', "%3F").replace('&', "%26");
 
+	// Retrieve other variables from Redlib request
+	let sort = param(&path, "sort").unwrap_or_default();
+	let username = req.param("name").unwrap_or_default();
 
-async fn render(username: String, sort: String) -> Result<HttpResponse> {
-	let user: User = user(&username).await;
-	let posts: Vec<Post> = posts(username, &sort).await;
-	
-	let s = UserTemplate {
-		user: user,
-		posts: posts,
-		sort: sort
+	// Retrieve info from user about page.
+	let user = user(&username).await.unwrap_or_default();
+
+	let req_url = req.uri().to_string();
+	// Return landing page if this post if this Reddit deems this user NSFW,
+	// but we have also disabled the display of NSFW content or if the instance
+	// is SFW-only.
+	if user.nsfw && crate::utils::should_be_nsfw_gated(&req, &req_url) {
+		return Ok(nsfw_landing(req, req_url).await.unwrap_or_default());
 	}
-	.render()
-	.unwrap();
-	Ok(HttpResponse::Ok().content_type("text/html").body(s))
-}
 
-// SERVICES
-#[get("/u/{username}")]
-async fn page(web::Path(username): web::Path<String>) -> Result<HttpResponse> {
-	render(username, "hot".to_string()).await
+	let filters = get_filters(&req);
+	if filters.contains(&["u_", &username].concat()) {
+		Ok(template(&UserTemplate {
+			user,
+			posts: Vec::new(),
+			sort: (sort, param(&path, "t").unwrap_or_default()),
+			ends: (param(&path, "after").unwrap_or_default(), String::new()),
+			listing,
+			prefs: Preferences::new(&req),
+			url,
+			redirect_url,
+			is_filtered: true,
+			all_posts_filtered: false,
+			all_posts_hidden_nsfw: false,
+			no_posts: false,
+		}))
+	} else {
+		// Request user posts/comments from Reddit
+		match Post::fetch(&path, false).await {
+			Ok((mut posts, after)) => {
+				let (_, all_posts_filtered) = filter_posts(&mut posts, &filters);
+				let no_posts = posts.is_empty();
+				let all_posts_hidden_nsfw = !no_posts && (posts.iter().all(|p| p.flags.nsfw) && setting(&req, "show_nsfw") != "on");
+				Ok(template(&UserTemplate {
+					user,
+					posts,
+					sort: (sort, param(&path, "t").unwrap_or_default()),
+					ends: (param(&path, "after").unwrap_or_default(), after),
+					listing,
+					prefs: Preferences::new(&req),
+					url,
+					redirect_url,
+					is_filtered: false,
+					all_posts_filtered,
+					all_posts_hidden_nsfw,
+					no_posts,
+				}))
+			}
+			// If there is an error show error page
+			Err(msg) => error(req, &msg).await,
+		}
+	}
 }
-
-#[get("/u/{username}/{sort}")]
-async fn sorted(web::Path((username, sort)): web::Path<(String, String)>) -> Result<HttpResponse> {
-	render(username, sort).await
-}
-
-// UTILITIES
-async fn user_val (j: &serde_json::Value, k: &str) -> String { String::from(j["data"]["subreddit"][k].as_str().unwrap()) }
-async fn post_val (j: &serde_json::Value, k: &str) -> String { String::from(j["data"][k].as_str().unwrap_or("Comment")) }
 
 // USER
-async fn user(name: &String) -> User {
-	let url: String = format!("https://www.reddit.com/user/{}/about.json", name);
-	let resp: String = reqwest::get(&url).await.unwrap().text().await.unwrap();
+async fn user(name: &str) -> Result<User, String> {
+	// Build the Reddit JSON API path
+	let path: String = format!("/user/{name}/about.json?raw_json=1");
 
-	let data: serde_json::Value = serde_json::from_str(resp.as_str()).expect("Failed to parse JSON");
-	
-	User {
-		name: name.to_string(),
-		icon: user_val(&data, "icon_img").await,
-		karma: data["data"]["total_karma"].as_i64().unwrap(),
-		banner: user_val(&data, "banner_img").await,
-		description: user_val(&data, "public_description").await
-	}
+	// Send a request to the url
+	json(path, false).await.map(|res| {
+		// Grab creation date as unix timestamp
+		let created_unix = res["data"]["created"].as_f64().unwrap_or(0.0).round() as i64;
+		let created = OffsetDateTime::from_unix_timestamp(created_unix).unwrap_or(OffsetDateTime::UNIX_EPOCH);
+
+		// Closure used to parse JSON from Reddit APIs
+		let about = |item| res["data"]["subreddit"][item].as_str().unwrap_or_default().to_string();
+
+		// Parse the JSON output into a User struct
+		User {
+			name: res["data"]["name"].as_str().unwrap_or(name).to_owned(),
+			title: about("title"),
+			icon: format_url(&about("icon_img")),
+			karma: res["data"]["total_karma"].as_i64().unwrap_or(0),
+			created: created.format(format_description!("[month repr:short] [day] '[year repr:last_two]")).unwrap_or_default(),
+			banner: about("banner_img"),
+			description: about("public_description"),
+			nsfw: res["data"]["subreddit"]["over_18"].as_bool().unwrap_or_default(),
+		}
+	})
 }
 
-// POSTS
-async fn posts(sub: String, sort: &String) -> Vec<Post> {
-	let url: String = format!("https://www.reddit.com/u/{}/.json?sort={}", sub, sort);
-	let resp: String = reqwest::get(&url).await.unwrap().text().await.unwrap();
-	
-	let popular: serde_json::Value = serde_json::from_str(resp.as_str()).expect("Failed to parse JSON");
-	let post_list = popular["data"]["children"].as_array().unwrap();
-
-	let mut posts: Vec<Post> = Vec::new();
-	
-	for post in post_list.iter() {
-		let img = if post_val(post, "thumbnail").await.starts_with("https:/") { post_val(post, "thumbnail").await } else { String::new() };
-		let unix_time: i64 = post["data"]["created_utc"].as_f64().unwrap().round() as i64;
-		let score = post["data"]["score"].as_i64().unwrap();
-		posts.push(Post {
-			title: post_val(post, "title").await,
-			community: post_val(post, "subreddit").await,
-			author: post_val(post, "author").await,
-			score: if score>1000 {format!("{}k",score/1000)} else {score.to_string()},
-			image: img,
-			url: post_val(post, "permalink").await,
-			time: Utc.timestamp(unix_time, 0).format("%b %e '%y").to_string()
-		});
+pub async fn rss(req: Request<Body>) -> Result<Response<Body>, String> {
+	if config::get_setting("REDLIB_ENABLE_RSS").is_none() {
+		return Ok(error(req, "RSS is disabled on this instance.").await.unwrap_or_default());
 	}
+	use crate::utils::rewrite_urls;
+	use hyper::header::CONTENT_TYPE;
+	use rss::{ChannelBuilder, Item};
 
-	posts
+	// Get user
+	let user_str = req.param("name").unwrap_or_default();
+
+	let listing = req.param("listing").unwrap_or_else(|| "overview".to_string());
+
+	// Get path
+	let path = format!("/user/{user_str}/{listing}.json?{}&raw_json=1", req.uri().query().unwrap_or_default(),);
+
+	// Get user
+	let user_obj = user(&user_str).await.unwrap_or_default();
+
+	// Get posts
+	let (posts, _) = Post::fetch(&path, false).await?;
+
+	// Build the RSS feed
+	let channel = ChannelBuilder::default()
+		.title(user_str)
+		.description(user_obj.description)
+		.items(
+			posts
+				.into_iter()
+				.map(|post| Item {
+					title: Some(post.title.to_string()),
+					link: Some(utils::get_post_url(&post)),
+					author: Some(post.author.name),
+					content: Some(rewrite_urls(&post.body)),
+					..Default::default()
+				})
+				.collect::<Vec<_>>(),
+		)
+		.build();
+
+	// Serialize the feed to RSS
+	let body = channel.to_string().into_bytes();
+
+	// Create the HTTP response
+	let mut res = Response::new(Body::from(body));
+	res.headers_mut().insert(CONTENT_TYPE, hyper::header::HeaderValue::from_static("application/rss+xml"));
+
+	Ok(res)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_fetching_user() {
+	let user = user("spez").await;
+	assert!(user.is_ok());
+	assert!(user.unwrap().karma > 100);
 }

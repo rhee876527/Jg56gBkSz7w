@@ -1,0 +1,62 @@
+name: Sync
+
+on:
+#  push:
+  schedule:
+    - cron: '0 1 * * *' # every 1am UTC
+  workflow_dispatch:
+
+jobs:
+  sync-fork:
+    runs-on: ubuntu-latest
+    env:
+     UPSTREAM: https://github.com/redlib-org/redlib.git
+     BRANCH: main
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Git
+      run: |
+        git config --global user.name "${{ github.actor }}"
+        git config --global user.email "${{ github.actor }}@users.noreply.github.com"
+        git remote add upstream ${{ env.UPSTREAM }}
+
+    - name: Fetch upstream changes
+      run: git fetch upstream
+
+    - name: Get commit dates
+      id: get_commit_dates
+      run: |
+        # Get the date of the latest commit on the current branch
+        FORK_DATE=$(git log -1 --format=%ct HEAD)
+        echo "FORK_DATE=$FORK_DATE" >> $GITHUB_ENV
+        echo "Fork last commit date: $(date -d @$FORK_DATE)"
+
+        # Get the date of the latest commit on the upstream branch
+        UPSTREAM_DATE=$(git log -1 --format=%ct upstream/${{ env.BRANCH }})
+        echo "UPSTREAM_DATE=$UPSTREAM_DATE" >> $GITHUB_ENV
+        echo "Upstream last commit date: $(date -d @$UPSTREAM_DATE)"
+
+
+    - name: Merge changes
+      if: env.FORK_DATE < env.UPSTREAM_DATE
+      run: |
+        git merge --no-commit --no-ff -Xtheirs --allow-unrelated-histories upstream/${{ env.BRANCH }} || true
+        # Exclude changed files from being synchronized
+        git reset HEAD .github/workflows/*.yaml .github/workflows/*.yml Dockerfile || true
+        git checkout -- .github/workflows/*.yaml .github/workflows/*.yml Dockerfile || true
+        git restore Dockerfile
+        git add -u
+
+    - name: Commit changes
+      if: env.FORK_DATE < env.UPSTREAM_DATE
+      run: |
+        git commit -m "Sync upstream changes" || echo "No changes to commit"
+
+    - name: Push changes
+      if: env.FORK_DATE < env.UPSTREAM_DATE
+      run: git push origin ${{ env.BRANCH }}
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
