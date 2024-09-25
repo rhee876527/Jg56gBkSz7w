@@ -1,7 +1,10 @@
-name: Sync
+name: Force Sync
 
 on:
-  push:
+  #push:
+  schedule:
+    #- cron: '30 5 * * *' # every 1am UTC
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 
 jobs:
@@ -14,6 +17,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.PAT_TOKEN }}
 
     - name: Set up Git
       run: |
@@ -56,5 +61,5 @@ jobs:
     - name: Push changes
       if: env.FORK_DATE > env.UPSTREAM_DATE
       run: git push origin ${{ env.BRANCH }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      #env:
+      #  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
