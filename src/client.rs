@@ -4,7 +4,6 @@ use futures_lite::future::block_on;
 use futures_lite::{future::Boxed, FutureExt};
 use hyper::client::HttpConnector;
 use hyper::header::HeaderValue;
-use hyper::StatusCode;
 use hyper::{body, body::Buf, client, header, Body, Client, Method, Request, Response, Uri};
 use hyper_rustls::HttpsConnector;
 use libflate::gzip;
@@ -417,6 +416,16 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 					match serde_json::from_reader(body.reader()) {
 						Ok(value) => {
 							let json: Value = value;
+
+							// If user is suspended
+							if let Some(data) = json.get("data") {
+								if let Some(is_suspended) = data.get("is_suspended").and_then(Value::as_bool) {
+									if is_suspended {
+										return Err("suspended".into());
+									}
+								}
+							}
+
 							// If Reddit returned an error
 							if json["error"].is_i64() {
 								// OAuth token has expired; http status 401
@@ -425,6 +434,7 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 									let () = force_refresh_token().await;
 									return Err("OAuth token has expired. Please refresh the page!".to_string());
 								}
+
 								// Handle quarantined
 								if json["reason"] == "quarantined" {
 									return Err("quarantined".into());
@@ -433,6 +443,15 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 								if json["reason"] == "gated" {
 									return Err("gated".into());
 								}
+								// Handle private subs
+								if json["reason"] == "private" {
+									return Err("private".into());
+								}
+								// Handle banned subs
+								if json["reason"] == "banned" {
+									return Err("banned".into());
+								}
+
 								Err(format!("Reddit error {} \"{}\": {} | {path}", json["error"], json["reason"], json["message"]))
 							} else {
 								Ok(json)
@@ -477,4 +496,25 @@ async fn test_share_link_strip_json() {
 	let link = "/17krzvz".into();
 	let canonical_link = "/comments/17krzvz".into();
 	assert_eq!(canonical_path(link, 3).await, Ok(Some(canonical_link)));
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn test_private_sub() {
+	let link = json("/r/suicide/about.json?raw_json=1".into(), true).await;
+	assert!(link.is_err());
+	assert_eq!(link, Err("private".into()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_banned_sub() {
+	let link = json("/r/aaa/about.json?raw_json=1".into(), true).await;
+	assert!(link.is_err());
+	assert_eq!(link, Err("banned".into()));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_gated_sub() {
+	// quarantine to false to specifically catch when we _don't_ catch it
+	let link = json("/r/drugs/about.json?raw_json=1".into(), false).await;
+	assert!(link.is_err());
+	assert_eq!(link, Err("gated".into()));
 }
