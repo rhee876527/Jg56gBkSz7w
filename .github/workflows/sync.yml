@@ -3,7 +3,7 @@ name: Sync
 on:
 #  push:
   schedule:
-    - cron: '0 1 * * *' # every 1am UTC
+    - cron: '03 22 * * *' # everyday@ 22:03 UTC
   workflow_dispatch:
 
 jobs:
@@ -16,6 +16,8 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.PAT_TOKEN }}
 
     - name: Set up Git
       run: |
@@ -58,5 +60,6 @@ jobs:
     - name: Push changes
       if: env.FORK_DATE < env.UPSTREAM_DATE
       run: git push origin ${{ env.BRANCH }}
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # use pat token instead to trigger build workflow after push
+      #env:
+      #  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
