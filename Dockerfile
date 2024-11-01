@@ -9,20 +9,20 @@ RUN apk add --no-cache musl-dev
 # Set the working directory
 WORKDIR /repo
 
-# Copy only the Cargo.toml and Cargo.lock files first to leverage caching
+# Copy only the Cargo files to leverage caching
 COPY Cargo.toml Cargo.lock ./
 
-# Start build from a new empty directory
+# Init cache for the build 
 RUN mkdir -v src && \
     echo 'fn main() {}' > src/main.rs
 
 # Build cache from dummy main.rs
-RUN cargo build --release --target aarch64-unknown-linux-musl || true
+RUN cargo build --release --target ${TARGET} || true
 
 # Copy the source code for the build 
 COPY . . 
 
-# Compile & build application
+# Compile & build application using dummy cache
 RUN cargo build --release --target ${TARGET} 
 
 # Create the final image for running application
