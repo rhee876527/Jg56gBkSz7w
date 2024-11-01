@@ -12,17 +12,16 @@ WORKDIR /repo
 # Copy only the Cargo.toml and Cargo.lock files first to leverage caching
 COPY Cargo.toml Cargo.lock ./
 
-# Create a new empty directory for the source code
+# Start build from a new empty directory
 RUN mkdir -v src && \
-    echo 'fn main() {}' > src/main.rs && \
-    cargo build --release --target ${TARGET} && \
-    rm -Rvf src
+    echo 'fn main() {}' > src/main.rs 
 
-# Copy the actual source code into the image 
+# Copy the source code for the build 
 COPY . . 
 
-# Build the application with the actual source code
-RUN cargo build --release --target ${TARGET}
+# Compile & build
+RUN cargo build --release --target ${TARGET} 
+
 
 # Create the final image
 FROM alpine:3.20 AS runtime
