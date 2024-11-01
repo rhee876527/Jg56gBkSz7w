@@ -14,16 +14,18 @@ COPY Cargo.toml Cargo.lock ./
 
 # Start build from a new empty directory
 RUN mkdir -v src && \
-    echo 'fn main() {}' > src/main.rs 
+    echo 'fn main() {}' > src/main.rs
+
+# Build cache from dummy main.rs
+RUN cargo build --release --target aarch64-unknown-linux-musl || true
 
 # Copy the source code for the build 
 COPY . . 
 
-# Compile & build
+# Compile & build application
 RUN cargo build --release --target ${TARGET} 
 
-
-# Create the final image
+# Create the final image for running application
 FROM alpine:3.20 AS runtime
 
 ARG TARGET
