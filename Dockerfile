@@ -17,6 +17,8 @@ RUN mkdir -v src && \
     echo 'fn main() {}' > src/main.rs
 
 # Build cache from dummy main.rs
+COPY src src
+RUN touch src/main.rs
 RUN cargo build --release --target ${TARGET} || true
 
 # Copy the source code for the build 
