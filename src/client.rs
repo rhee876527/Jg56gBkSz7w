@@ -231,27 +231,37 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 
 	// Build request to Reddit. When making a GET, request gzip compression.
 	// (Reddit doesn't do brotli yet.)
-	let builder = Request::builder()
-		.method(method)
-		.uri(&url)
-		.header("User-Agent", user_agent)
-		.header("Client-Vendor-Id", vendor_id)
-		.header("X-Reddit-Device-Id", device_id)
-		.header("x-reddit-loid", loid)
-		.header("Host", host)
-		.header("Authorization", &format!("Bearer {token}"))
-		.header("Accept-Encoding", if method == Method::GET { "gzip" } else { "identity" })
-		.header("Accept-Language", "en-US,en;q=0.5")
-		.header("Connection", "keep-alive")
-		.header(
+	let mut headers = vec![
+		("User-Agent", user_agent),
+		("Client-Vendor-Id", vendor_id),
+		("X-Reddit-Device-Id", device_id),
+		("x-reddit-loid", loid),
+		("Host", host.to_string()),
+		("Authorization", format!("Bearer {token}")),
+		("Accept-Encoding", if method == Method::GET { "gzip".into() } else { "identity".into() }),
+		(
 			"Cookie",
 			if quarantine {
-				"_options=%7B%22pref_quarantine_optin%22%3A%20true%2C%20%22pref_gated_sr_optin%22%3A%20true%7D"
+				"_options=%7B%22pref_quarantine_optin%22%3A%20true%2C%20%22pref_gated_sr_optin%22%3A%20true%7D".into()
 			} else {
-				""
+				"".into()
 			},
-		)
-		.body(Body::empty());
+		),
+		("X-Reddit-Width", fastrand::u32(300..500).to_string()),
+		("X-Reddit-DPR", "2".to_owned()),
+		("Device-Name", format!("Android {}", fastrand::u8(9..=14))),
+	];
+
+	// shuffle headers: https://github.com/redlib-org/redlib/issues/324
+	fastrand::shuffle(&mut headers);
+
+	let mut builder = Request::builder().method(method).uri(&url);
+
+	for (key, value) in headers {
+		builder = builder.header(key, value);
+	}
+
+	let builder = builder.body(Body::empty());
 
 	async move {
 		match builder {
