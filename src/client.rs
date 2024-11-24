@@ -19,7 +19,7 @@ use std::{io, result::Result};
 use crate::dbg_msg;
 use crate::oauth::{force_refresh_token, token_daemon, Oauth};
 use crate::server::RequestExt;
-use crate::utils::format_url;
+use crate::utils::{format_url, Post};
 
 const REDDIT_URL_BASE: &str = "https://oauth.reddit.com";
 const REDDIT_URL_BASE_HOST: &str = "oauth.reddit.com";
@@ -235,12 +235,10 @@ fn request(method: &'static Method, path: String, redirect: bool, quarantine: bo
 
 	{
 		let client = OAUTH_CLIENT.load_full();
-		for (key, value) in client.initial_headers.clone() {
+		for (key, value) in client.headers_map.clone() {
 			headers.push((key, value));
 		}
 	}
-
-	trace!("Headers: {:#?}", headers);
 
 	// shuffle headers: https://github.com/redlib-org/redlib/issues/324
 	fastrand::shuffle(&mut headers);
@@ -390,6 +388,12 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 					"Ratelimit remaining: Header says {remaining}, we have {current_rate_limit}. Resets in {reset}. Rollover: {}. Ratelimit used: {used}",
 					if is_rolling_over { "yes" } else { "no" },
 				);
+
+				// If can parse remaining as a float, round to a u16 and save
+				if let Ok(val) = remaining.parse::<f32>() {
+					OAUTH_RATELIMIT_REMAINING.store(val.round() as u16, Ordering::SeqCst);
+				}
+
 				Some(reset)
 			} else {
 				None
@@ -472,6 +476,55 @@ pub async fn json(path: String, quarantine: bool) -> Result<Value, String> {
 		}
 		Err(e) => err("Couldn't send request to Reddit", e, path),
 	}
+}
+
+async fn self_check(sub: &str) -> Result<(), String> {
+	let query = format!("/r/{sub}/hot.json?&raw_json=1");
+
+	match Post::fetch(&query, true).await {
+		Ok(_) => Ok(()),
+		Err(e) => Err(e),
+	}
+}
+
+pub async fn rate_limit_check() -> Result<(), String> {
+	// First, check a subreddit.
+	self_check("reddit").await?;
+	// This will reduce the rate limit to 99. Assert this check.
+	if OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst) != 99 {
+		return Err(format!("Rate limit check failed: expected 99, got {}", OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst)));
+	}
+	// Now, we switch out the OAuth client.
+	// This checks for the IP rate limit association.
+	force_refresh_token().await;
+	// Now, check a new sub to break cache.
+	self_check("rust").await?;
+	// Again, assert the rate limit check.
+	if OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst) != 99 {
+		return Err(format!("Rate limit check failed: expected 99, got {}", OAUTH_RATELIMIT_REMAINING.load(Ordering::SeqCst)));
+	}
+
+	Ok(())
+}
+
+#[cfg(test)]
+use {crate::config::get_setting, sealed_test::prelude::*};
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_rate_limit_check() {
+	rate_limit_check().await.unwrap();
+}
+
+#[test]
+#[sealed_test(env = [("REDLIB_DEFAULT_SUBSCRIPTIONS", "rust")])]
+fn test_default_subscriptions() {
+	tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap().block_on(async {
+		let subscriptions = get_setting("REDLIB_DEFAULT_SUBSCRIPTIONS");
+		assert!(subscriptions.is_some());
+
+		// check rate limit
+		rate_limit_check().await.unwrap();
+	});
 }
 
 #[cfg(test)]
