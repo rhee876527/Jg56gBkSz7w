@@ -1,5 +1,5 @@
 # Use a Rust base image for building
-FROM rust:alpine3.19 AS builder
+FROM rust:alpine3.21 AS builder
 
 ARG TARGET
 
@@ -28,7 +28,7 @@ COPY . .
 RUN cargo build --release --target ${TARGET} 
 
 # Create the final image for running application
-FROM alpine:3.20 AS runtime
+FROM alpine:3.21 AS runtime
 
 ARG TARGET
 
