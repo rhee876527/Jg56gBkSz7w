@@ -21,9 +21,9 @@ jobs:
 
     - name: Set up Git
       run: |
-        git config --global user.name "${{ github.actor }}"
-        git config --global user.email "${{ github.actor }}@users.noreply.github.com"
-        git remote add upstream ${{ env.UPSTREAM }}
+          git config --global user.name "GitHub Action"
+          git config --global user.email "action@github.com"
+          git remote add upstream ${{ env.UPSTREAM }}
 
     - name: Fetch upstream changes
       run: git fetch upstream
@@ -43,7 +43,7 @@ jobs:
 
 
     - name: Merge changes
-      if: env.FORK_DATE < env.UPSTREAM_DATE
+      if: env.FORK_DATE > env.UPSTREAM_DATE
       run: |
         git merge --no-commit --no-ff -Xtheirs --allow-unrelated-histories upstream/${{ env.BRANCH }} || true
         # Exclude changed files from being synchronized
@@ -53,12 +53,12 @@ jobs:
         git add -u
 
     - name: Commit changes
-      if: env.FORK_DATE < env.UPSTREAM_DATE
+      if: env.FORK_DATE > env.UPSTREAM_DATE
       run: |
         git commit -m "Sync upstream changes" || echo "No changes to commit"
 
     - name: Push changes
-      if: env.FORK_DATE < env.UPSTREAM_DATE
+      if: env.FORK_DATE > env.UPSTREAM_DATE
       run: git push origin ${{ env.BRANCH }}
       # use pat token instead to trigger build workflow after push
       #env:
