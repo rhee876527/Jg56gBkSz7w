@@ -43,7 +43,7 @@ jobs:
 
 
     - name: Merge changes
-      if: env.FORK_DATE > env.UPSTREAM_DATE
+      if: env.FORK_DATE < env.UPSTREAM_DATE
       run: |
         git merge --no-commit --no-ff -Xtheirs --allow-unrelated-histories upstream/${{ env.BRANCH }} || true
         # Exclude changed files from being synchronized
@@ -53,12 +53,12 @@ jobs:
         git add -u
 
     - name: Commit changes
-      if: env.FORK_DATE > env.UPSTREAM_DATE
+      if: env.FORK_DATE < env.UPSTREAM_DATE
       run: |
         git commit -m "Sync upstream changes" || echo "No changes to commit"
 
     - name: Push changes
-      if: env.FORK_DATE > env.UPSTREAM_DATE
+      if: env.FORK_DATE < env.UPSTREAM_DATE
       run: git push origin ${{ env.BRANCH }}
       # use pat token instead to trigger build workflow after push
       #env:
